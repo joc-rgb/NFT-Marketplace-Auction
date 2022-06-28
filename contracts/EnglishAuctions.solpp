@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: Unlicense
+pragma soliditypp >=0.8.0 <0.9.0;
+
+import "./openzeppelin/security/ReentrancyGuard.sol";
+import "./IAuction.solpp";
+import "./openzeppelin/utils/Counters.sol";
+import "./openzeppelin/token/ERC721/IERC721.sol";
+
+contract EnglishAuctions is ReentrancyGuard{
+using Counters for Counters.Counter;
+    Counters.Counter auctionId;
+    enum AuctionState { 
+        OPEN,
+        CANCELLED,
+        ENDED,
+        UPCOMING
+    }
+    Auction [] auctions;
+
+    struct Bid{
+        address bidder;
+        uint bid;
+    }
+    struct Auction{
+        uint aucId;
+        uint startTime;
+        uint endTime; 
+        uint startPrice;
+        uint reservedPrice;
+        uint minIncrement; // The minimum increase for the bid
+        address creator;
+        address nftAddr; // The address of the NFT contract
+        uint tokenId; // The id of the token
+        uint highestBid;
+        address highestBidder;
+        AuctionState aucState;
+        bool isCancelled;
+        bool tokenRedeemed;
+        bool fundClaimed;
+    }
+    mapping(uint=>Bid[]) bids; 
+    function createAuction(uint _startTime,uint _endTime, uint _startPrice,uint _reservedPrice, uint _minIncrement, address _nftAddr,uint _tokenId) external returns(uint){
+        require(block.timestamp >= _startTime, "Auction start time must be in future");
+        uint aucId = auctionId.current();
+        uint startTime = _startTime;
+        uint endTime = _endTime;
+        AuctionState aucState;
+        if(block.timestamp<startTime)
+            aucState = AuctionState.UPCOMING;
+        else
+            aucState = AuctionState.OPEN;
+        auctions.push(Auction(aucId,startTime,endTime,_startPrice,_reservedPrice,_minIncrement,payable(msg.sender),_nftAddr,_tokenId,0,address(0),aucState,false,false,false));
+        auctionId.increment();
+        IERC721 nft = IERC721(_nftAddr);
+        nft.transferFrom(msg.sender, address(this), _tokenId);
+        emit NewAuction(aucId,startTime,endTime,_startPrice,_reservedPrice,_minIncrement,_nftAddr,_tokenId);
+        return aucId;
+    }
+
+    //check auctionId
+    modifier isValidAuction(uint _id){
+        require(_id<=auctionId.current(),"Invalid ID");
+        _;
+    }
+
+    // Place a bid on the auction
+    function placeBid(uint _id) payable  external isValidAuction(_id) returns(bool){
+        auctions[_id].aucState = getAuctionState(_id);
+        require(msg.sender != auctions[_id].creator,"Cannot bid your NFT"); // The auction creator can not place a bid
+        require(auctions[_id].aucState == AuctionState.OPEN,"Auction's closed"); // The auction must be open
+        require(msg.value > auctions[_id].highestBid,"Value is too small");
+        bids[_id].push(Bid(msg.sender,msg.value));
+        uint256 lastHighestBid = auctions[_id].highestBid; // The last highest bid
+        address lastHighestBidder = auctions[_id].highestBidder;
+        auctions[_id].highestBid = msg.value; // The new highest bid
+        auctions[_id].highestBidder = msg.sender; // The address of the new highest bidder
+        if(lastHighestBid != 0){ // if there is a bid
+            payable(address(lastHighestBidder)).transfer("tti_5649544520544f4b454e6e40", lastHighestBid); // refund the previous bid to the previous highest bidder
+        }
+        emit NewBid(msg.sender,msg.value); // emit a new bid event
+        return true; // The bid was placed successfully
+    }
+
+    // Withdraw the token after the auction is over
+    function redeemToken(uint _id) external  isValidAuction(_id) returns(bool){
+        auctions[_id].aucState = getAuctionState(_id);
+        require(auctions[_id].aucState == AuctionState.ENDED);  
+        require(msg.sender == auctions[_id].highestBidder,"Not highest bidder"); // The highest bidder can only withdraw the token
+        require(!auctions[_id].tokenRedeemed,"You've redeemed it.");
+        auctions[_id].tokenRedeemed=true;
+        IERC721 nft = IERC721(auctions[_id].nftAddr);
+        nft.transferFrom(address(this), auctions[_id].highestBidder, auctions[_id].tokenId); // Transfer the token to the highest bidder
+        emit RedeemToken(auctions[_id].highestBidder); // Emit a withdraw token event
+        return true;
+    }
+
+    // Withdraw the funds after the auction is over
+    function claimFunds(uint _id) external isValidAuction(_id)   returns(bool){ 
+        auctions[_id].aucState = getAuctionState(_id);
+        require(auctions[_id].aucState == AuctionState.ENDED);  
+        require(msg.sender == auctions[_id].creator,"Not creator"); 
+        require(!auctions[_id].fundClaimed,"You've claimed it.");
+        auctions[_id].fundClaimed = true;
+        payable(address(auctions[_id].creator)).transfer("tti_5649544520544f4b454e6e40",auctions[_id].highestBid); // Transfers funds to the creator
+        emit ClaimFunds(msg.sender,auctions[_id].highestBid); 
+        return true;
+    } 
+
+    function cancelAuction(uint _id) external isValidAuction(_id)  returns(bool){ // Cancel the auction
+        auctions[_id].aucState = getAuctionState(_id);
+        require(msg.sender == auctions[_id].creator,"Not creator"); 
+        require(auctions[_id].aucState == AuctionState.OPEN,"Auction's closed");
+        require(auctions[_id].highestBid<auctions[_id].reservedPrice,"Reserved price is reached"); // The auction must not be cancelled if bid>reserved price
+        auctions[_id].isCancelled = true; // The auction has been cancelled
+        auctions[_id].aucState = AuctionState.CANCELLED;
+        IERC721 nft = IERC721(auctions[_id].nftAddr);
+        nft.transferFrom(address(this), auctions[_id].creator, auctions[_id].tokenId); // Transfer the NFT token back to the auction creator
+        payable(address(auctions[_id].highestBidder)).transfer("tti_5649544520544f4b454e6e40",auctions[_id].highestBid); //Transfer fund back to the highest bidder
+        emit AuctionCanceled(); // Emit Auction Canceled event
+        return true;
+    } 
+
+    // Get the auction state
+    function getAuctionState(uint _id) public isValidAuction(_id) view returns(AuctionState) {
+        
+        if(auctions[_id].isCancelled) return AuctionState.CANCELLED; // If the auction is cancelled return CANCELLED
+        if(block.timestamp >= auctions[_id].endTime) return AuctionState.ENDED; // The auction is over if the block timestamp is greater than the end timestamp, return ENDED
+        if (block.timestamp >= auctions[_id].startTime) return AuctionState.OPEN; //Auction ongoing
+        else
+            return AuctionState.UPCOMING; // Otherwise return UPCOMING
+    } 
+        
+    // Return all the infomation of auction
+    function getStartTime(uint _id) external isValidAuction(_id) view returns(uint){
+        return auctions[_id].startTime;
+    }
+    function getEndTime(uint _id) external isValidAuction(_id) view returns(uint){
+        return auctions[_id].endTime;
+    }
+    function getStartPrice(uint _id) external isValidAuction(_id) view returns(uint){
+        return auctions[_id].startPrice;
+    }
+    function getReservedPrice(uint _id) external isValidAuction(_id) view returns(uint){
+        return auctions[_id].reservedPrice;
+    }
+    function getminIncrement(uint _id) external isValidAuction(_id) view returns(uint){
+        return auctions[_id].minIncrement;
+    }
+    function getCreator(uint _id) external isValidAuction(_id) view returns(address){
+        return auctions[_id].creator;
+    }
+    function getNftAddress(uint _id) external isValidAuction(_id) view returns(address){
+        return auctions[_id].nftAddr;
+    }
+    function getTokenId(uint _id) external isValidAuction(_id) view returns(uint){
+        return auctions[_id].tokenId;
+    }
+    function getAllBids(uint _id) external isValidAuction(_id) view returns(address[] memory, uint[] memory){
+        address[] memory addrs = new address[](bids[_id].length);
+        uint256[] memory bidPrice = new uint256[](bids[_id].length);
+        for (uint256 i = 0; i < bids[_id].length; i++) {
+            addrs[i] = bids[_id][i].bidder;
+            bidPrice[i] = bids[_id][i].bid;
+        }
+        return (addrs, bidPrice);
+    }
+    function getHighestBid(uint _id) external isValidAuction(_id) view returns(uint){
+        return auctions[_id].highestBid;
+    }
+    function getHighestBidder(uint _id) external isValidAuction(_id) view returns(address){
+        return auctions[_id].highestBidder;
+    }
+    function getIsCancelled(uint _id) external isValidAuction(_id) view returns(bool){
+        return auctions[_id].isCancelled;
+    }
+    function getTokenRedeemed(uint _id) external isValidAuction(_id) view returns(bool){
+        return auctions[_id].tokenRedeemed;
+    }
+    function getFundClaimed(uint _id) external isValidAuction(_id) view returns(bool){
+        return auctions[_id].fundClaimed;
+    } 
+
+    //pagination of all ongoing and ended auctions and their basic infos
+    function getAuctionPaging(uint256 offset, uint256 length)
+    external
+    view
+    returns (uint[] memory auctionIds,uint nextOffset)
+    {
+        
+        if (length > auctions.length - offset) {
+            length = auctions.length - offset;
+        }
+
+        auctionIds = new uint[](length);
+
+        for (uint256 i = 0; i < length; i++) {
+            auctionIds[i] = auctions[offset + i].aucId;
+        }
+
+        return (auctionIds, offset + length);
+    }
+
+    //read full auction info
+    function getAuctionInfo(uint _id)
+    external
+    view isValidAuction(_id)
+    returns (uint startTime,uint endTime,uint startPrice,uint reservedPrice,uint minIncrement, address creator,address nftAddr,uint tokenId,uint highestBid,address highestBidder,uint aucState){
+     
+        startTime = auctions[_id].startTime;
+        endTime = auctions[_id].endTime;
+        startPrice = auctions[_id].startPrice;
+        reservedPrice = auctions[_id].reservedPrice;
+        minIncrement = auctions[_id].minIncrement;
+        creator = auctions[_id].creator;
+        nftAddr = auctions[_id].nftAddr;
+        tokenId = auctions[_id].tokenId;
+        highestBid = auctions[_id].highestBid;
+        highestBidder = auctions[_id].highestBidder;
+        aucState = uint(auctions[_id].aucState);
+        return (startTime,endTime,startPrice,reservedPrice,minIncrement,creator,nftAddr,tokenId,highestBid,highestBidder,aucState);
+    }
+
+    function getTotalAuction() external view returns(uint){
+        return auctionId.current();
+    }
+
+    event NewAuction(uint id,uint _startTime, uint _endTime, uint _startPrice,uint _reservedPrice, uint _minIncrement, address _nftAddr,uint _tokenId);
+    event NewBid(address bidder, uint bid); // A new bid was placed
+    event RedeemToken(address withdrawer); // The auction winner withdrawed the token
+    event ClaimFunds(address withdrawer, uint256 amount); // The auction owner withdrawed the funds
+    event AuctionCanceled(); // The auction was cancelled
+
+
+}

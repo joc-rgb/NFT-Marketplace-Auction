@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: MIT
+pragma soliditypp ^0.8.0;
+
+interface IAuction{
+    
+    function placeBid() payable external returns(bool);
+    function allBids() external view returns (address[] memory, uint256[] memory);
+    function redeemToken() external returns(bool);
+    function claimFunds() external returns(bool);
+    function cancelAuction() external returns(bool);
+    event NewBid(address bidder, uint bid); // A new bid was placed
+    event RedeemToken(address withdrawer); // The auction winner withdrawed the token
+    event ClaimFunds(address withdrawer, uint256 amount); // The auction owner withdrawed the funds
+    event AuctionCanceled(); // The auction was cancelled
+    event NewAuction(uint id,uint _startTime, uint _periodInHour, uint _startPrice,uint _reservedPrice, uint _decreaseRate, address _nftAddr,uint _tokenId);
+}
