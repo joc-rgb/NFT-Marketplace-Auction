@@ -40,7 +40,7 @@ using Counters for Counters.Counter;
     }
     mapping(uint=>Bid[]) bids; 
     function createAuction(uint _startTime,uint _endTime, uint _startPrice,uint _reservedPrice, uint _decreaseRate, address _nftAddr,uint _tokenId) external returns(uint){
-        require(block.timestamp >= _startTime, "Auction start time must be in future");
+        require(_startTime > block.timestamp, "Auction start time must be in future");
         uint diff = (_endTime - _startTime) / 60 / 60 / 24;
         require(_startPrice >= _decreaseRate * diff, "starting price < min");
         uint aucId = auctionId.current();
